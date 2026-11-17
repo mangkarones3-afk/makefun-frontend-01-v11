@@ -1,64 +1,48 @@
-// serve.ts — a small static file server for app/, for local runs:
-//   node serve.ts            → http://localhost:8080
-//   node serve.ts --port N   → another port
-// Standard library only. It serves files under app/, refuses anything
-// outside it, and sets the content types a browser needs for ES modules.
+// serve.ts — a small static server for app/ so the frontend can be opened in
+// a desktop browser: node serve.ts [--port 8080]. It sends an ETag per file
+// and answers If-None-Match with 304, like the make.fun API does.
 
-import { createReadStream, statSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { extname, resolve, sep } from 'node:path';
+import { readFile, stat } from 'node:fs/promises';
+import { join, normalize, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = resolve(fileURLToPath(new URL('./app', import.meta.url)));
-const args = process.argv.slice(2);
-const at = args.indexOf('--port');
-const wanted = at === -1 ? 8080 : Number(args[at + 1]);
-const port = Number.isInteger(wanted) && wanted > 0 && wanted < 65536 ? wanted : 8080;
+const root = join(fileURLToPath(new URL('.', import.meta.url)), 'app');
+const portArg = process.argv.indexOf('--port');
+const port = portArg >= 0 ? Number(process.argv[portArg + 1]) : 8080;
 
-const TYPES: Record<string, string> = {
+const types = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.svg': 'image/svg+xml',
+  '.json': 'application/json',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
+  '.svg': 'image/svg+xml',
   '.webp': 'image/webp',
-  '.ico': 'image/x-icon',
 };
 
-const server = createServer((req, res) => {
-  let path: string;
+createServer(async (req, res) => {
   try {
-    path = decodeURIComponent(new URL(req.url ?? '/', 'http://localhost').pathname);
+    const url = new URL(req.url || '/', 'http://localhost');
+    let path = normalize(decodeURIComponent(url.pathname)).replace(/^(\.\.[/\\])+/, '');
+    if (path === '/' || path === '\\') path = '/index.html';
+    const file = join(root, path);
+    const info = await stat(file);
+    if (!info.isFile()) throw new Error('not a file');
+    const etag = '"' + info.size.toString(16) + '-' + Math.floor(info.mtimeMs).toString(16) + '"';
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, { etag });
+      res.end();
+      return;
+    }
+    const body = await readFile(file);
+    res.writeHead(200, { 'content-type': types[extname(file)] || 'application/octet-stream', etag });
+    res.end(body);
   } catch {
-    res.writeHead(400).end('bad request');
-    return;
+    res.writeHead(404, { 'content-type': 'text/plain' });
+    res.end('not found');
   }
-  if (path.endsWith('/')) path += 'index.html';
-  const file = resolve(root, '.' + path);
-  if (file !== root && !file.startsWith(root + sep)) {
-    res.writeHead(403).end('forbidden');
-    return;
-  }
-  let size: number;
-  try {
-    const st = statSync(file);
-    if (!st.isFile()) throw new Error('not a file');
-    size = st.size;
-  } catch {
-    res.writeHead(404).end('not found');
-    return;
-  }
-  res.writeHead(200, {
-    'content-type': TYPES[extname(file).toLowerCase()] ?? 'application/octet-stream',
-    'content-length': size,
-    'cache-control': 'no-store',
-  });
-  createReadStream(file).pipe(res);
-});
-
-server.listen(port, '127.0.0.1', () => {
-  console.log(`app/ is on http://localhost:${port}`);
+}).listen(port, () => {
+  console.log('serving app/ at http://localhost:' + port);
 });

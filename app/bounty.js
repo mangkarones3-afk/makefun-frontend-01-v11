@@ -1,95 +1,125 @@
-// bounty.js — one bounty's page: fact cards from the live payload, the
-// rewards table at today's values, and the description's markdown
-// rendered safely (HTML escaped first, a small subset applied after).
+// bounty.js — one bounty's page: summary, rules and description (markdown
+// rendered safely: the text is escaped first, then a small markdown subset is
+// applied), the live-pot fact cards, and the rewards table whose Base prize,
+// Fee share and Pays now columns are the API's own rewardsNow figures.
 
-import { get } from './api.js';
-import { countdown, int, money, timeLeft } from './format.js';
-import { escapeHtml, onCleanup } from './main.js';
+import { getJSON } from './api.js';
+import { money, count, dateShort, timeLeft } from './format.js';
 
-function mdInline(text) {
-  return text
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function inlineMd(s) {
+  return s
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
     .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" rel="noopener">$1</a>');
 }
 
-// Escape first, then structure: headings, lists, paragraphs. Nothing the
-// payload contains can become markup the author did not intend.
-export function markdown(src) {
-  const lines = escapeHtml(src || '').split('\n');
+// markdown(md) — headings, lists, paragraphs and inline marks, on escaped text.
+export function markdown(md) {
   const out = [];
   let list = null;
-  const closeList = () => { if (list) { out.push(list === 'ul' ? '</ul>' : '</ol>'); list = null; } };
-  for (const raw of lines) {
+  const closeList = () => {
+    if (list) {
+      out.push('</' + list + '>');
+      list = null;
+    }
+  };
+  for (const raw of escapeHtml(md || '').split('\n')) {
     const line = raw.trim();
-    if (!line) { closeList(); continue; }
-    const h = line.match(/^(#{1,3})\s+(.*)$/);
-    if (h) { closeList(); out.push(`<h${h[1].length + 1}>${mdInline(h[2])}</h${h[1].length + 1}>`); continue; }
-    const bullet = line.match(/^[-*]\s+(.*)$/);
-    if (bullet) {
-      if (list !== 'ul') { closeList(); out.push('<ul>'); list = 'ul'; }
-      out.push(`<li>${mdInline(bullet[1])}</li>`);
-      continue;
+    const h = line.match(/^(#{1,4})\s+(.*)/);
+    const bullet = line.match(/^[-*]\s+(.*)/);
+    const numbered = line.match(/^\d+[.)]\s+(.*)/);
+    if (h) {
+      closeList();
+      const level = Math.min(h[1].length + 1, 5);
+      out.push('<h' + level + '>' + inlineMd(h[2]) + '</h' + level + '>');
+    } else if (bullet || numbered) {
+      const kind = bullet ? 'ul' : 'ol';
+      if (list !== kind) {
+        closeList();
+        out.push('<' + kind + '>');
+        list = kind;
+      }
+      out.push('<li>' + inlineMd((bullet || numbered)[1]) + '</li>');
+    } else if (line === '') {
+      closeList();
+    } else {
+      closeList();
+      out.push('<p>' + inlineMd(line) + '</p>');
     }
-    const numbered = line.match(/^\d+[.)]\s+(.*)$/);
-    if (numbered) {
-      if (list !== 'ol') { closeList(); out.push('<ol>'); list = 'ol'; }
-      out.push(`<li>${mdInline(numbered[1])}</li>`);
-      continue;
-    }
-    closeList();
-    out.push(`<p>${mdInline(line)}</p>`);
   }
   closeList();
   return out.join('\n');
 }
 
-export async function render(el, slug) {
-  const b = await get('/competitions/' + slug);
-  const rewards = b.rewardsNow || [];
-  const closed = new Date(b.deadline).getTime() <= Date.now();
+function factCard(label, big, sub) {
+  return (
+    '<div class="fact"><span class="fact-label">' + label + '</span>' +
+    '<span class="fact-big">' + big + '</span>' +
+    '<span class="fact-sub">' + sub + '</span></div>'
+  );
+}
 
-  el.innerHTML = `
-    <p class="crumbs"><a href="#/">← The board</a> · ${escapeHtml(b.sponsor?.name || 'make.fun')} · ${escapeHtml(b.category || '')}</p>
-    <h1 class="bountytitle">${escapeHtml(b.title)}</h1>
-    <section class="factcards">
-      <div class="factcard">
-        <span class="factlabel">Live pot</span>
-        <span class="factvalue">${money(b.potUsd ?? b.rewardAmount)}</span>
-        <span class="factsub">${money(b.rewardAmount)} base + ${money(b.entryFeesUsd)} fees</span>
-      </div>
-      <div class="factcard">
-        <span class="factlabel">Entry fee</span>
-        <span class="factvalue">${b.entryFeeUsd ? money(b.entryFeeUsd) : 'Free'}</span>
-        <span class="factsub">${b.entryFeeUsd ? 'paid once per account' : 'no fee to enter'}</span>
-      </div>
-      <div class="factcard">
-        <span class="factlabel">Time left</span>
-        <span class="factvalue" id="bountyClock">${closed ? 'Closed' : countdown(b.deadline)}</span>
-        <span class="factsub">${closed ? 'deadline passed' : 'until the deadline'}</span>
-      </div>
-      <div class="factcard">
-        <span class="factlabel">Entries</span>
-        <span class="factvalue">${int(b.submissionCount)}</span>
-        <span class="factsub">submissions so far</span>
-      </div>
-    </section>
-    ${rewards.length ? `
-    <h2>Rewards — what each place pays now</h2>
-    <table class="rewards">
-      <thead><tr><th>Place</th><th>Base prize</th><th>Fee share</th><th>Pays now</th></tr></thead>
-      <tbody>
-        ${rewards.map((r) => `<tr><td>${r.place}</td><td>${money(r.baseUsd)}</td><td>${money(r.feeShareUsd)}</td><td><strong>${money(r.amountUsd)}</strong></td></tr>`).join('')}
-      </tbody>
-    </table>` : ''}
-    <p class="viewlinks"><a class="buttonlink" href="#/leaderboard/${b.slug}">See the leaderboard →</a></p>
-    <h2>About this bounty</h2>
-    <div class="prose">${markdown(b.description)}</div>`;
+export async function renderBounty(view, slug) {
+  const b = await getJSON('/competitions/' + encodeURIComponent(slug));
+  const now = Date.now();
+  const open = new Date(b.deadline).getTime() > now;
+  const rewards = Array.isArray(b.rewardsNow) ? b.rewardsNow : [];
+  const leaders = await getJSON('/competitions/' + encodeURIComponent(slug) + '/leaderboard').catch(() => null);
+  const top = leaders && leaders.entries ? leaders.entries.slice(0, 5) : [];
 
-  if (!closed) {
-    const clock = el.querySelector('#bountyClock');
-    const timer = setInterval(() => { if (clock) clock.textContent = countdown(b.deadline); }, 1000);
-    onCleanup(() => clearInterval(timer));
-  }
+  const facts =
+    factCard('Live pot', money(b.potUsd ?? b.rewardAmount), money(b.rewardAmount) + ' base + ' + money(b.entryFeesUsd) + ' fees') +
+    factCard('Entry fee', Number(b.entryFeeUsd) > 0 ? money(b.entryFeeUsd) : 'Free entry', 'Paid once per account') +
+    factCard(
+      'Time left',
+      '<span data-timeleft-to="' + b.deadline + '">' + (open ? timeLeft(b.deadline, now) : 'Closed') + '</span>',
+      'Deadline ' + dateShort(b.deadline),
+    ) +
+    factCard('Entries', count(b.submissionCount), count(b.entryFeePayers) + ' fee payers');
+
+  const rewardRows = rewards
+    .map(
+      (r) =>
+        '<tr><td>' + r.place + '</td><td>' + money(r.baseUsd) + '</td><td>' + money(r.feeShareUsd) + '</td>' +
+        '<td><strong>' + money(r.amountUsd) + '</strong></td></tr>',
+    )
+    .join('');
+
+  const leaderRows = top
+    .map(
+      (e) =>
+        '<li><a href="#/profile/' + encodeURIComponent(e.handle) + '">@' + escapeHtml(e.handle) + '</a>' +
+        ' <span class="leader-title">' + escapeHtml(e.title || '') + '</span></li>',
+    )
+    .join('');
+
+  view.innerHTML =
+    '<article class="bounty">' +
+    '<p class="crumbs"><a href="#/">← Board</a> · <a href="#/leaderboard/' + encodeURIComponent(slug) + '">Leaderboard →</a></p>' +
+    '<h1 class="bounty-title"></h1>' +
+    '<p class="bounty-meta"></p>' +
+    '<section class="facts">' + facts + '</section>' +
+    '<h2>Rewards</h2>' +
+    '<table class="rewards"><thead><tr><th>Place</th><th>Base prize</th><th>Fee share</th><th>Pays now</th></tr></thead>' +
+    '<tbody>' + rewardRows + '</tbody></table>' +
+    (top.length ? '<h2>Leading entries</h2><ul class="leaders">' + leaderRows + '</ul>' : '') +
+    '<div class="prose"></div>' +
+    '</article>';
+
+  view.querySelector('.bounty-title').textContent = b.title;
+  view.querySelector('.bounty-meta').textContent =
+    (b.sponsor ? b.sponsor.name : 'make.fun') + ' · ' + b.category +
+    ((b.skills && b.skills.length) ? ' · ' + b.skills.join(', ') : '') +
+    ' · ' + (open ? 'Open for entries' : 'Closed') +
+    ' · Published ' + dateShort(b.publishedAt) + ' · Deadline ' + dateShort(b.deadline);
+  view.querySelector('.prose').innerHTML = markdown(b.description || b.summary || '');
 }
