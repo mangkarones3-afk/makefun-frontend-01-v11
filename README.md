@@ -1,7 +1,8 @@
 # Frontend v11 — a make.fun client in ink and green
 
-[![Repository](https://img.shields.io/badge/GitHub-makefun--frontend--01--v11-0e6b3a)](https://github.com/mangkarones3-afk/makefun-frontend-01-v11)
-[![Bounty](https://img.shields.io/badge/make.fun-Build_the_best_frontend-1a2420)](https://github.com/mangkarones3-afk/makefun-frontend-01-v11)
+[![make.fun · makefun-frontend-01](https://make.fun/badge/makefun-frontend-01.svg)](https://make.fun/bounty/makefun-frontend-01?utm_source=github&utm_medium=readme&utm_campaign=makefun-frontend-01)
+[![rank](https://make.fun/badge/makefun-frontend-01/mangkarones3-afk/makefun-frontend-01-v11/rank.svg)](https://make.fun/bounty/makefun-frontend-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=makefun-frontend-01)
+[![reward](https://make.fun/badge/makefun-frontend-01/mangkarones3-afk/makefun-frontend-01-v11/reward.svg)](https://make.fun/bounty/makefun-frontend-01?utm_source=github&utm_medium=readme&utm_campaign=makefun-frontend-01)
 [![License: MIT](https://img.shields.io/badge/License-MIT-fcfcfa)](https://github.com/mangkarones3-afk/makefun-frontend-01-v11/blob/main/LICENSE)
 
 A read-only frontend for [make.fun](https://make.fun), built for the
