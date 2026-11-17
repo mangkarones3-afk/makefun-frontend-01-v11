@@ -1,107 +1,95 @@
-// bounty.js — one bounty's page: summary, fact cards, the rewards table
-// priced off the live pot, its description and its latest entries.
+// bounty.js — one bounty's page: fact cards from the live payload, the
+// rewards table at today's values, and the description's markdown
+// rendered safely (HTML escaped first, a small subset applied after).
 
 import { get } from './api.js';
-import { esc } from './main.js';
-import { commas, dateShort, isOpen, money, money2, timeLeft } from './format.js';
+import { countdown, int, money, timeLeft } from './format.js';
+import { escapeHtml, onCleanup } from './main.js';
 
-// Escape first, then a small markdown subset — API text can never
-// become markup the author did not write.
-function inline(text) {
+function mdInline(text) {
   return text
-    .split('`')
-    .map((part, i) => {
-      if (i % 2 === 1) return '<code>' + part + '</code>';
-      return part
-        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-        .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
-        .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (whole, label, url) =>
-          /^(https:\/\/|\/|#)/.test(url) ? `<a href="${url}">${label}</a>` : label);
-    })
-    .join('');
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" rel="noopener">$1</a>');
 }
 
-function markdown(src) {
-  const lines = esc(src || '').split('\n');
+// Escape first, then structure: headings, lists, paragraphs. Nothing the
+// payload contains can become markup the author did not intend.
+export function markdown(src) {
+  const lines = escapeHtml(src || '').split('\n');
   const out = [];
   let list = null;
-  let para = [];
-  const flushPara = () => {
-    if (para.length) out.push('<p>' + inline(para.join(' ')) + '</p>');
-    para = [];
-  };
-  const flushList = () => {
-    if (list) out.push('<ul>' + list.map((li) => '<li>' + inline(li) + '</li>').join('') + '</ul>');
-    list = null;
-  };
+  const closeList = () => { if (list) { out.push(list === 'ul' ? '</ul>' : '</ol>'); list = null; } };
   for (const raw of lines) {
     const line = raw.trim();
-    if (!line) { flushPara(); flushList(); continue; }
-    const heading = line.match(/^(#{1,3})\s+(.*)$/);
-    if (heading) {
-      flushPara(); flushList();
-      const tag = heading[1].length === 1 ? 'h2' : heading[1].length === 2 ? 'h3' : 'h4';
-      out.push(`<${tag}>` + inline(heading[2]) + `</${tag}>`);
+    if (!line) { closeList(); continue; }
+    const h = line.match(/^(#{1,3})\s+(.*)$/);
+    if (h) { closeList(); out.push(`<h${h[1].length + 1}>${mdInline(h[2])}</h${h[1].length + 1}>`); continue; }
+    const bullet = line.match(/^[-*]\s+(.*)$/);
+    if (bullet) {
+      if (list !== 'ul') { closeList(); out.push('<ul>'); list = 'ul'; }
+      out.push(`<li>${mdInline(bullet[1])}</li>`);
       continue;
     }
-    if (/^[-*]\s+/.test(line)) {
-      flushPara();
-      (list ??= []).push(line.replace(/^[-*]\s+/, ''));
+    const numbered = line.match(/^\d+[.)]\s+(.*)$/);
+    if (numbered) {
+      if (list !== 'ol') { closeList(); out.push('<ol>'); list = 'ol'; }
+      out.push(`<li>${mdInline(numbered[1])}</li>`);
       continue;
     }
-    flushList();
-    para.push(line);
+    closeList();
+    out.push(`<p>${mdInline(line)}</p>`);
   }
-  flushPara(); flushList();
+  closeList();
   return out.join('\n');
 }
 
-function rewardsTable(b) {
-  const now = Array.isArray(b.rewardsNow) ? b.rewardsNow : [];
-  if (now.length) {
-    const rows = now.map((r) =>
-      `<tr><td>${r.place}</td><td>${money2(r.baseUsd)}</td>` +
-      `<td>${money2(r.feeShareUsd)}</td><td><strong>${money2(r.amountUsd)}</strong></td></tr>`).join('');
-    return `<table class="rewards"><thead><tr>
-      <th>Place</th><th>Base prize</th><th>Fee share</th><th>Pays now</th>
-      </tr></thead><tbody>${rows}</tbody></table>
-      <p class="table-note">Pays now is the live figure: the base prize plus this place's share of the entry fees in the pot.</p>`;
-  }
-  const base = b.rewards || {};
-  const places = Object.keys(base).sort((a, c) => Number(a) - Number(c));
-  if (!places.length) return '<p>No rewards published.</p>';
-  const rows = places.map((p) =>
-    `<tr><td>${p}</td><td><strong>${money2(base[p])}</strong></td></tr>`).join('');
-  return `<table class="rewards"><thead><tr><th>Place</th><th>Base prize</th></tr></thead><tbody>${rows}</tbody></table>`;
-}
+export async function render(el, slug) {
+  const b = await get('/competitions/' + slug);
+  const rewards = b.rewardsNow || [];
+  const closed = new Date(b.deadline).getTime() <= Date.now();
 
-export async function render(root, slug) {
-  root.innerHTML = '<p class="loading">Loading the bounty…</p>';
-  const b = await get('/competitions/' + encodeURIComponent(slug));
-  const open = isOpen(b);
-  const potSub = b.rewardAmount != null && b.entryFeesUsd != null
-    ? `${money(b.rewardAmount)} base + ${money(b.entryFeesUsd)} fees`
-    : 'Base prize pool';
-  const latest = (b.submissions || []).slice(0, 8);
-
-  root.innerHTML = `
-    <p class="crumbs"><a href="#/">← Board</a> · <a href="#/bounty/${encodeURIComponent(slug)}/leaderboard">Leaderboard →</a></p>
-    <h1 class="bounty-h">${esc(b.title)}</h1>
-    <p class="subline">make.fun · ${esc(b.category)}${b.skills?.length ? ' · ' + esc(b.skills.join(', ')) : ''}
-      · ${open ? 'Open for entries' : 'Closed'} · Published ${dateShort(b.publishedAt)} · Deadline ${dateShort(b.deadline)}</p>
-    <section class="cards" aria-label="Bounty facts">
-      <div class="card"><label>Live pot</label><strong class="card-big">${money(b.potUsd ?? b.rewardAmount)}</strong><span>${potSub}</span></div>
-      <div class="card"><label>Entry fee</label><strong class="card-big">${b.entryFeeUsd ? money(b.entryFeeUsd) : 'Free'}</strong><span>${b.entryFeeUsd ? 'Paid once per account' : 'No fee to enter'}</span></div>
-      <div class="card"><label>Time left</label><strong class="card-big" data-left="${esc(b.deadline)}">${timeLeft(b.deadline)}</strong><span>Deadline ${dateShort(b.deadline)}</span></div>
-      <div class="card"><label>Entries</label><strong class="card-big">${commas(b.submissionCount || 0)}</strong><span>${b.entryFeePayers ? commas(b.entryFeePayers) + ' fee payers' : 'Submitted so far'}</span></div>
+  el.innerHTML = `
+    <p class="crumbs"><a href="#/">← The board</a> · ${escapeHtml(b.sponsor?.name || 'make.fun')} · ${escapeHtml(b.category || '')}</p>
+    <h1 class="bountytitle">${escapeHtml(b.title)}</h1>
+    <section class="factcards">
+      <div class="factcard">
+        <span class="factlabel">Live pot</span>
+        <span class="factvalue">${money(b.potUsd ?? b.rewardAmount)}</span>
+        <span class="factsub">${money(b.rewardAmount)} base + ${money(b.entryFeesUsd)} fees</span>
+      </div>
+      <div class="factcard">
+        <span class="factlabel">Entry fee</span>
+        <span class="factvalue">${b.entryFeeUsd ? money(b.entryFeeUsd) : 'Free'}</span>
+        <span class="factsub">${b.entryFeeUsd ? 'paid once per account' : 'no fee to enter'}</span>
+      </div>
+      <div class="factcard">
+        <span class="factlabel">Time left</span>
+        <span class="factvalue" id="bountyClock">${closed ? 'Closed' : countdown(b.deadline)}</span>
+        <span class="factsub">${closed ? 'deadline passed' : 'until the deadline'}</span>
+      </div>
+      <div class="factcard">
+        <span class="factlabel">Entries</span>
+        <span class="factvalue">${int(b.submissionCount)}</span>
+        <span class="factsub">submissions so far</span>
+      </div>
     </section>
-    <h2 class="section-h">Rewards</h2>
-    ${rewardsTable(b)}
-    <h2 class="section-h">About this bounty</h2>
-    <div class="prose">${markdown(b.description)}</div>
-    ${b.resolution?.summary ? `<h2 class="section-h">How it is decided</h2><div class="prose">${markdown(b.resolution.summary)}</div>` : ''}
-    ${latest.length ? `<h2 class="section-h">Latest entries</h2>
-      <ul class="entries-list">${latest.map((s) =>
-        `<li><a href="#/u/${encodeURIComponent(s.hunter)}">@${esc(s.hunter)}</a> — ${esc(s.title || 'Untitled entry')}
-         <span class="entry-status">${esc(s.status || '')}</span></li>`).join('')}</ul>` : ''}`;
+    ${rewards.length ? `
+    <h2>Rewards — what each place pays now</h2>
+    <table class="rewards">
+      <thead><tr><th>Place</th><th>Base prize</th><th>Fee share</th><th>Pays now</th></tr></thead>
+      <tbody>
+        ${rewards.map((r) => `<tr><td>${r.place}</td><td>${money(r.baseUsd)}</td><td>${money(r.feeShareUsd)}</td><td><strong>${money(r.amountUsd)}</strong></td></tr>`).join('')}
+      </tbody>
+    </table>` : ''}
+    <p class="viewlinks"><a class="buttonlink" href="#/leaderboard/${b.slug}">See the leaderboard →</a></p>
+    <h2>About this bounty</h2>
+    <div class="prose">${markdown(b.description)}</div>`;
+
+  if (!closed) {
+    const clock = el.querySelector('#bountyClock');
+    const timer = setInterval(() => { if (clock) clock.textContent = countdown(b.deadline); }, 1000);
+    onCleanup(() => clearInterval(timer));
+  }
 }

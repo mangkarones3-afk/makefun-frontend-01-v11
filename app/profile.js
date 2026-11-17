@@ -1,43 +1,56 @@
-// profile.js — an account's public profile: who they are, their record
-// across competitions, and what they have entered lately.
+// profile.js — an account's public profile: stat cards from the payload's
+// record block and the account's recent entries from its solutions list.
 
-import { get } from './api.js';
-import { esc } from './main.js';
-import { commas, dateShort, money } from './format.js';
+import { assetUrl, get } from './api.js';
+import { dateShort, int, money } from './format.js';
+import { escapeHtml } from './main.js';
 
-export async function render(root, handle) {
-  root.innerHTML = '<p class="loading">Loading the profile…</p>';
+export async function render(el, handle) {
   const p = await get('/profiles/' + encodeURIComponent(handle));
-  const rec = p.record || {};
-  const avatar = p.image || p.avatar?.url;
+  const r = p.record || {};
   const solutions = p.solutions || [];
+  const name = p.display_name || '@' + p.handle;
 
-  root.innerHTML = `
-    <section class="profile-head">
-      ${avatar ? `<img class="avatar-lg" crossorigin="anonymous" src="https://make.fun${esc(avatar)}" alt="">` : ''}
+  el.innerHTML = `
+    <section class="profilehead">
+      ${p.image ? `<img class="bigavatar" src="${assetUrl(p.image)}" alt="" onerror="this.remove()">` : ''}
       <div>
-        <h1 class="bounty-h">@${esc(p.handle)}</h1>
-        <p class="subline">${p.display_name ? esc(p.display_name) + ' · ' : ''}Joined ${dateShort(p.joined_at)}</p>
-        ${p.bio ? `<p class="bio">${esc(p.bio)}</p>` : ''}
+        <h1>${escapeHtml(name)}</h1>
+        <p class="subline">@${escapeHtml(p.handle)}${p.joined_at ? ' · on make.fun since ' + dateShort(p.joined_at) : ''}</p>
+        ${p.bio ? `<p class="bio">${escapeHtml(p.bio)}</p>` : ''}
       </div>
     </section>
-    <section class="cards" aria-label="Record">
-      <div class="card"><label>Entered</label><strong class="card-big">${commas(rec.competitions_entered || 0)}</strong><span>Competitions</span></div>
-      <div class="card"><label>Placed</label><strong class="card-big">${commas(rec.competitions_placed || 0)}</strong><span>${commas(rec.competitions_won || 0)} won</span></div>
-      <div class="card"><label>Best placement</label><strong class="card-big">${rec.best_placement ? '#' + commas(rec.best_placement) : '—'}</strong><span>Across all entries</span></div>
-      <div class="card"><label>Prizes</label><strong class="card-big">${money(rec.prize_usd || 0)}</strong><span>Won so far</span></div>
+    <section class="factcards">
+      <div class="factcard">
+        <span class="factlabel">Entered</span>
+        <span class="factvalue">${int(r.competitions_entered)}</span>
+        <span class="factsub">competitions</span>
+      </div>
+      <div class="factcard">
+        <span class="factlabel">Placed / won</span>
+        <span class="factvalue">${int(r.competitions_placed)} / ${int(r.competitions_won)}</span>
+        <span class="factsub">in the prizes / first place</span>
+      </div>
+      <div class="factcard">
+        <span class="factlabel">Best placement</span>
+        <span class="factvalue">${r.best_placement ? '#' + r.best_placement : '—'}</span>
+        <span class="factsub">${int(r.podium_finishes)} podium finishes</span>
+      </div>
+      <div class="factcard">
+        <span class="factlabel">Prizes won</span>
+        <span class="factvalue">${money(r.prize_usd)}</span>
+        <span class="factsub">across all bounties</span>
+      </div>
     </section>
-    <h2 class="section-h">Recent entries</h2>
-    ${solutions.length
-      ? `<ul class="entries-list">${solutions.slice(0, 12).map((s) => {
-          const comp = s.competition || {};
-          const where = comp.slug
-            ? `<a href="#/bounty/${encodeURIComponent(comp.slug)}">${esc(comp.title || comp.slug)}</a>`
-            : esc(comp.title || 'Competition');
-          const placed = s.placement ? ` · placed #${commas(s.placement)}` : '';
-          const prize = s.prize_usd ? ` · ${money(s.prize_usd)}` : '';
-          return `<li>${esc(s.title || 'Untitled entry')} — ${where}
-            <span class="entry-status">${dateShort(s.entered_at)}${placed}${prize}</span></li>`;
-        }).join('')}</ul>`
-      : '<p>No entries yet.</p>'}`;
+    <h2>Recent entries</h2>
+    <div class="solutionlist">
+      ${solutions.slice(0, 10).map((s) => `
+        <a class="solutionrow" href="#/bounty/${s.competition?.slug || ''}">
+          <span class="rowmain">
+            <span class="rowtitle">${escapeHtml(s.title || 'Entry')}</span>
+            <span class="rowsub">${escapeHtml(s.competition?.title || '')}</span>
+          </span>
+          <span class="rowcell"><span class="celllabel">Status</span>${escapeHtml(s.competition?.status || '')}</span>
+        </a>`).join('') || '<p class="empty">No entries yet.</p>'}
+    </div>`;
 }

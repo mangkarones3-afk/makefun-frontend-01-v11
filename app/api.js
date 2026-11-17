@@ -1,67 +1,85 @@
-// api.js — the one read path for the whole app.
-// Every GET goes through a single in-memory cache keyed by URL:
-//   - a fresh entry (younger than FRESH_MS) is served with no request;
-//   - an older entry is revalidated with If-None-Match, and a 304 answer
-//     serves the cached body unchanged;
-//   - concurrent reads of the same URL share one in-flight request.
-// The counters are real: the shell's status bar prints them (D5), so the
-// performance story the judge reads is the one the session actually lived.
+// api.js — the app's one cache for every make.fun read.
+//
+// A Map keyed by URL holds { etag, body }. A repeat read revalidates with
+// If-None-Match and treats a 304 as "unchanged": the cached body is served
+// again instead of the payload being downloaded twice. Requests for the
+// same URL that overlap in time share one fetch (in-flight de-dup), so the
+// board rail and the board view never cost two requests between them.
+//
+// The counters are honest session counts, shown in the status bar:
+//   requests    — fetches actually made
+//   revalidated — fetches the server answered 304
+//   fromCache   — reads served out of the cache after a 304
 
 const BASE = 'https://make.fun/api';
-const FRESH_MS = 20_000;
 
-const cache = new Map(); // url -> { etag, body, at }
-const inflight = new Map(); // url -> Promise<body>
+const cache = new Map();
+const inflight = new Map();
+
+export const stats = { requests: 0, revalidated: 0, fromCache: 0 };
+export const state = { status: 'Live — fetching…', at: 0 };
+
 const listeners = new Set();
 
-export const stats = { requests: 0, revalidated: 0, cacheServes: 0 };
-let lastLabel = 'Live — fetched just now';
-
-export function statusSnapshot() {
-  return { label: lastLabel, stats: { ...stats } };
-}
-
-export function onStatus(fn) {
+export function onStats(fn) {
   listeners.add(fn);
   return () => listeners.delete(fn);
 }
 
 function emit() {
-  const snap = statusSnapshot();
-  for (const fn of listeners) fn(snap);
+  for (const fn of listeners) fn({ ...stats }, { ...state });
 }
 
-async function fetchBody(url, entry) {
-  const headers = {};
-  if (entry && entry.etag) headers['If-None-Match'] = entry.etag;
-  stats.requests += 1;
-  const res = await fetch(url, { headers });
-  if (res.status === 304 && entry) {
-    stats.revalidated += 1;
-    entry.at = Date.now();
-    lastLabel = 'Served from cache — revalidated, unchanged';
-    emit();
-    return entry.body;
-  }
-  if (!res.ok) throw new Error('make.fun answered ' + res.status + ' for ' + url);
-  const body = await res.json();
-  cache.set(url, { etag: res.headers.get('etag'), body, at: Date.now() });
-  lastLabel = 'Live — fetched just now';
-  emit();
-  return body;
+export function apiUrl(path) {
+  return BASE + path;
 }
 
-// get('/competitions') -> parsed JSON body, from cache or the network.
-export function get(path) {
+export function assetUrl(path) {
+  if (!path) return '';
+  if (path.startsWith('http')) return path;
+  return 'https://make.fun' + path;
+}
+
+export async function get(path) {
   const url = BASE + path;
-  const entry = cache.get(url);
-  if (entry && Date.now() - entry.at < FRESH_MS) {
-    stats.cacheServes += 1;
+  const pending = inflight.get(url);
+  if (pending) return pending;
+
+  const run = (async () => {
+    const hit = cache.get(url);
+    const headers = {};
+    if (hit && hit.etag) headers['If-None-Match'] = hit.etag;
+    stats.requests += 1;
+    let res;
+    try {
+      res = await fetch(url, { headers });
+    } catch (err) {
+      state.status = 'Offline — showing the last cached read';
+      emit();
+      if (hit) return hit.body;
+      throw err;
+    }
+    if (res.status === 304 && hit) {
+      stats.revalidated += 1;
+      stats.fromCache += 1;
+      state.status = 'Served from cache — revalidated, unchanged';
+      state.at = Date.now();
+      emit();
+      return hit.body;
+    }
+    if (!res.ok) throw new Error('make.fun answered HTTP ' + res.status);
+    const body = await res.json();
+    cache.set(url, { etag: res.headers.get('etag'), body });
+    state.status = 'Live — fetched just now';
+    state.at = Date.now();
     emit();
-    return Promise.resolve(entry.body);
+    return body;
+  })();
+
+  inflight.set(url, run);
+  try {
+    return await run;
+  } finally {
+    inflight.delete(url);
   }
-  if (inflight.has(url)) return inflight.get(url);
-  const pending = fetchBody(url, entry).finally(() => inflight.delete(url));
-  inflight.set(url, pending);
-  return pending;
 }

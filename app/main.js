@@ -1,156 +1,151 @@
-// main.js — the shell every route shares: masthead, the live status bar
-// (with the cache's real counters), the board rail, and the hash router.
-// Views arrive by import() only when their route is opened, so the first
-// load stays the shell page alone.
+// main.js — the shell: masthead, Live status bar, the board rail, routing.
+//
+// Views are separate modules attached by dynamic import(), so the first
+// load is this shell alone and each view's code arrives only when its
+// route is opened. The rail and the board view read the same cached
+// /competitions response, so the master-detail layout costs one request.
 
-import { get, onStatus, statusSnapshot } from './api.js';
-import { money, timeLeft, clockTime } from './format.js';
-
-export function esc(text) {
-  return String(text ?? '')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;');
-}
+import { get, onStats, stats, state } from './api.js';
+import { moneyShort, timeLeft } from './format.js';
 
 const app = document.getElementById('app');
 
 app.innerHTML = `
   <header class="masthead">
     <a class="wordmark" href="#/">make.fun</a>
-    <span class="tagline">The bounty board, read live.</span>
-    <nav class="topnav">
-      <a href="#/">Board</a>
-      <span class="navhint">Pick a bounty for its page, its leaderboard and its people.</span>
+    <p class="tagline">The bounty board, read live.</p>
+    <nav class="mainnav">
+      <a href="#/" data-nav="board">Board</a>
+      <a href="#/leaderboard/makefun-frontend-01" data-nav="leaderboard">Leaderboard</a>
+      <a href="#/profile/mangkarones" data-nav="profile">Profile</a>
     </nav>
   </header>
-  <section class="statusbar" aria-label="Live status">
-    <span class="status-dot" aria-hidden="true"></span>
-    <span class="status-label" id="statusLabel">Live status</span>
-    <span class="status-counts" id="statusCounts"></span>
-    <span class="status-clock" id="statusClock"></span>
-  </section>
+  <div class="statusbar" role="status">
+    <span class="statuslabel">Live status</span>
+    <span id="statusText">Live — fetching…</span>
+    <span class="statussep">·</span>
+    <span id="statusCounts">0 requests · 0 revalidated (304) · 0 from cache</span>
+    <span class="clock" id="clock">--:--:--</span>
+  </div>
   <div class="layout">
-    <aside class="rail" id="rail" aria-label="All bounties"></aside>
+    <aside class="rail" id="rail" aria-label="Live board"></aside>
     <main class="view" id="view"></main>
   </div>`;
 
 const viewEl = document.getElementById('view');
 const railEl = document.getElementById('rail');
-const labelEl = document.getElementById('statusLabel');
-const countsEl = document.getElementById('statusCounts');
-const clockEl = document.getElementById('statusClock');
+const statusText = document.getElementById('statusText');
+const statusCounts = document.getElementById('statusCounts');
+const clockEl = document.getElementById('clock');
 
-function paintStatus(snap) {
-  labelEl.textContent = snap.label;
-  const s = snap.stats;
-  countsEl.textContent =
-    `${s.requests} request${s.requests === 1 ? '' : 's'} · ` +
-    `${s.revalidated} revalidated (304) · ${s.cacheServes} from cache`;
+function paintStatus() {
+  statusText.textContent = state.status;
+  statusCounts.textContent =
+    `${stats.requests} ${stats.requests === 1 ? 'request' : 'requests'} · ` +
+    `${stats.revalidated} revalidated (304) · ${stats.fromCache} from cache`;
 }
-paintStatus(statusSnapshot());
-onStatus(paintStatus);
+onStats(paintStatus);
+paintStatus();
 
-// One tick a second: the status clock and every live countdown on the page
-// (elements carrying data-left="<deadline iso>") stay honest.
-function tick() {
-  clockEl.textContent = clockTime(new Date());
-  const now = Date.now();
-  for (const node of document.querySelectorAll('[data-left]')) {
-    node.textContent = timeLeft(node.dataset.left, now);
+setInterval(() => {
+  clockEl.textContent = new Date().toLocaleTimeString('en-GB');
+}, 1000);
+clockEl.textContent = new Date().toLocaleTimeString('en-GB');
+
+// --- cleanups: views register timers/listeners, the router runs them ---
+let cleanups = [];
+export function onCleanup(fn) {
+  cleanups.push(fn);
+}
+function runCleanups() {
+  for (const fn of cleanups) {
+    try { fn(); } catch { /* a view's cleanup must never break routing */ }
   }
+  cleanups = [];
 }
-tick();
-setInterval(tick, 1000);
 
-// --- the rail: the board's own read, reused beside every view ---------
-
+// --- the rail: the live board list beside every view (one cached read) ---
 let railSlug = null;
-
-function paintRail(items) {
-  const now = Date.now();
-  railEl.innerHTML =
-    '<h2 class="rail-title">Live board</h2>' +
-    items
-      .map((b) => {
-        const cls = b.slug === railSlug ? 'rail-item active' : 'rail-item';
-        return `<a class="${cls}" href="#/bounty/${encodeURIComponent(b.slug)}">
-          <span class="rail-name">${esc(b.title)}</span>
-          <span class="rail-meta">${money(b.potUsd ?? b.rewardAmount)} pot · ` +
-          `<span data-left="${esc(b.deadline)}">${timeLeft(b.deadline, now)}</span></span></a>`;
-      })
-      .join('');
-}
-
-async function loadRail() {
+async function paintRail() {
   try {
     const data = await get('/competitions');
-    paintRail(data.items || []);
+    const items = (data.items || []).slice(0, 14);
+    railEl.innerHTML =
+      `<p class="railhead">Live board</p>` +
+      items.map((b) => `
+        <a class="railrow${b.slug === railSlug ? ' active' : ''}" href="#/bounty/${b.slug}">
+          <span class="railtitle">${escapeHtml(b.title)}</span>
+          <span class="railmeta">${moneyShort(b.potUsd ?? b.rewardAmount)} · ${timeLeft(b.deadline)}</span>
+        </a>`).join('');
   } catch {
-    railEl.innerHTML = '<h2 class="rail-title">Live board</h2><p class="rail-note">Board unavailable.</p>';
+    railEl.innerHTML = '<p class="railhead">Live board</p><p class="railmeta">Board unavailable.</p>';
   }
 }
-loadRail();
 
-// --- the router ---------------------------------------------------------
+export function escapeHtml(s) {
+  return String(s ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
+}
 
+// --- routing ---
 const routes = [
-  { pattern: /^#\/bounty\/([^/]+)\/leaderboard$/, view: 'leaderboard', key: 'slug' },
-  { pattern: /^#\/bounty\/([^/]+)$/, view: 'bounty', key: 'slug' },
-  { pattern: /^#\/u\/([^/]+)$/, view: 'profile', key: 'handle' },
+  { name: 'board', pattern: /^\/?$/, load: () => import('./board.js') },
+  { name: 'bounty', pattern: /^\/bounty\/([\w-]+)$/, load: () => import('./bounty.js') },
+  { name: 'leaderboard', pattern: /^\/leaderboard\/([\w-]+)$/, load: () => import('./leaderboard.js') },
+  { name: 'profile', pattern: /^\/profile\/([\w-]+)$/, load: () => import('./profile.js') },
 ];
 
-let navigation = 0;
+let routeToken = 0;
 
-async function render() {
-  const ticket = ++navigation;
+async function route() {
+  const token = ++routeToken;
+  runCleanups();
   window.__shotReady = false;
-  const hash = location.hash || '#/';
-  let name = 'board';
-  let param = null;
-  for (const route of routes) {
-    const match = hash.match(route.pattern);
-    if (match) {
-      name = route.view;
-      param = decodeURIComponent(match[1]);
-      break;
-    }
+  const hash = location.hash.replace(/^#/, '');
+  let matched = routes[0];
+  let arg = null;
+  for (const r of routes) {
+    const m = hash.match(r.pattern);
+    if (m) { matched = r; arg = m[1] ?? null; break; }
   }
-  railSlug = name === 'bounty' || name === 'leaderboard' ? param : null;
-  if (railEl.children.length > 1) loadRail();
-
+  document.querySelectorAll('[data-nav]').forEach((a) => {
+    a.classList.toggle('current', a.dataset.nav === matched.name);
+  });
+  railSlug = matched.name === 'bounty' ? arg : null;
+  viewEl.innerHTML = '<p class="loading">Loading…</p>';
+  paintRail();
   try {
-    let mod;
-    if (name === 'bounty') mod = await import('./bounty.js');
-    else if (name === 'leaderboard') mod = await import('./leaderboard.js');
-    else if (name === 'profile') mod = await import('./profile.js');
-    else mod = await import('./board.js');
-    if (ticket !== navigation) return;
-    await mod.render(viewEl, param);
+    const mod = await matched.load();
+    if (token !== routeToken) return;
+    await mod.render(viewEl, arg);
   } catch (err) {
-    if (ticket !== navigation) return;
-    viewEl.innerHTML = `<section class="notice"><h1>Something failed to load</h1>` +
-      `<p>${esc(err && err.message ? err.message : err)}</p>` +
-      `<p><a href="#/">Back to the board</a></p></section>`;
+    if (token !== routeToken) return;
+    viewEl.innerHTML = `<p class="error">This view could not load. ${escapeHtml(err.message || err)}</p>`;
   }
-  if (ticket === navigation) window.__shotReady = true;
+  if (token === routeToken) window.__shotReady = true;
 }
 
-window.addEventListener('hashchange', render);
-render();
+window.addEventListener('hashchange', route);
 
-// "/" focuses the board search from anywhere.
-window.addEventListener('keydown', (event) => {
-  if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey) return;
-  const target = event.target;
-  if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
-  event.preventDefault();
-  const box = document.getElementById('boardSearch');
-  if (box) {
-    box.focus();
-  } else {
+// "/" focuses the board search from anywhere: on the board it focuses the
+// input directly; elsewhere it goes to the board first, then focuses.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
+  const tag = (e.target.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+  e.preventDefault();
+  const focusSearch = () => {
+    const input = document.getElementById('boardSearch');
+    if (input) input.focus();
+  };
+  if (document.getElementById('boardSearch')) focusSearch();
+  else {
     location.hash = '#/';
-    setTimeout(() => document.getElementById('boardSearch')?.focus(), 60);
+    setTimeout(focusSearch, 350);
   }
 });
+
+route();

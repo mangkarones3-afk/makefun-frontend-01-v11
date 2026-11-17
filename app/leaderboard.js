@@ -1,61 +1,73 @@
-// leaderboard.js — a bounty's standings: rank, entrant, win rate with
-// its 90% interval (the API carries judge_low / judge_high), and the
-// prize each place pays now. 100 rows a page, paged in place.
+// leaderboard.js — the standings for one bounty, 100 rows to a page.
+// Win rates and their intervals come straight from the payload's micro
+// fields (values.judge / judge_low / judge_high); prizes are the bounty
+// payload's own rewardsNow amounts for the row's prize rank.
 
-import { get } from './api.js';
-import { esc } from './main.js';
-import { money2, ratePct } from './format.js';
+import { assetUrl, get } from './api.js';
+import { int, money, pct } from './format.js';
+import { escapeHtml } from './main.js';
 
-const PAGE_SIZE = 100;
-let page = 0;
+const PAGE = 100;
 
-export async function render(root, slug) {
-  root.innerHTML = '<p class="loading">Loading the leaderboard…</p>';
-  const [comp, board] = await Promise.all([
-    get('/competitions/' + encodeURIComponent(slug)),
-    get('/competitions/' + encodeURIComponent(slug) + '/leaderboard'),
+export async function render(el, slug) {
+  const [lb, bounty] = await Promise.all([
+    get('/competitions/' + slug + '/leaderboard'),
+    get('/competitions/' + slug),
   ]);
-  const entries = board.entries || [];
-  const paysNow = new Map(
-    (comp.rewardsNow || []).map((r) => [r.place, r.amountUsd]),
-  );
-  const pages = Math.max(1, Math.ceil(entries.length / PAGE_SIZE));
-  if (page >= pages) page = 0;
+  const entries = lb.entries || [];
+  const prizeByPlace = new Map((bounty.rewardsNow || []).map((r) => [r.place, r.amountUsd]));
+  const pages = Math.max(1, Math.ceil(entries.length / PAGE));
+  let page = 1;
+
+  el.innerHTML = `
+    <p class="crumbs"><a href="#/bounty/${slug}">← ${escapeHtml(bounty.title)}</a></p>
+    <h1>Leaderboard</h1>
+    <p class="subline">${int(entries.length)} ranked entries · win rates from the judge's matches, intervals at 90%.</p>
+    <table class="standings">
+      <thead><tr><th>Rank</th><th>Entrant</th><th>Win rate</th><th>W–D–L</th><th>Prize</th></tr></thead>
+      <tbody id="lbBody"></tbody>
+    </table>
+    <div class="pager">
+      <button id="lbPrev" class="pagerbtn">← Prev</button>
+      <span id="lbRows" class="rowsline"></span>
+      <button id="lbNext" class="pagerbtn">Next →</button>
+    </div>`;
+
+  const body = el.querySelector('#lbBody');
+  const rowsLine = el.querySelector('#lbRows');
+  const prev = el.querySelector('#lbPrev');
+  const next = el.querySelector('#lbNext');
 
   function paint() {
-    const from = page * PAGE_SIZE;
-    const slice = entries.slice(from, from + PAGE_SIZE);
-    const rows = slice.map((e) => {
+    const from = (page - 1) * PAGE;
+    const slice = entries.slice(from, from + PAGE);
+    body.innerHTML = slice.map((e) => {
       const v = e.values || {};
-      const prize = e.prize_rank != null && paysNow.has(e.prize_rank)
-        ? money2(paysNow.get(e.prize_rank))
-        : '—';
-      const avatar = e.image
-        ? `<img class="avatar" crossorigin="anonymous" src="https://make.fun${esc(e.image)}" alt="">`
-        : '';
+      const j = e.judge || {};
+      const prize = e.prize_rank ? prizeByPlace.get(e.prize_rank) : null;
       return `<tr>
-        <td class="rank">${e.rank}</td>
-        <td>${avatar}<a href="#/u/${encodeURIComponent(e.handle)}">@${esc(e.handle)}</a>
-          <span class="entry-title">${esc(e.title || '')}</span></td>
-        <td class="rate"><strong>${ratePct(v.judge)}</strong>
-          <span class="interval">${ratePct(v.judge_low)} – ${ratePct(v.judge_high)}</span></td>
-        <td>${prize}</td></tr>`;
+        <td class="rankcell">${e.rank ?? '—'}</td>
+        <td>
+          <a class="entrant" href="#/profile/${encodeURIComponent(e.handle)}">
+            ${e.image ? `<img class="avatar" src="${assetUrl(e.image)}" alt="" loading="lazy" onerror="this.remove()">` : ''}
+            <span><span class="handle">@${escapeHtml(e.handle)}</span>
+            <span class="entrytitle">${escapeHtml(e.title || '')}</span></span>
+          </a>
+        </td>
+        <td><span class="winrate">${pct(v.judge)}</span>
+          <span class="interval">${pct(v.judge_low, 1)} – ${pct(v.judge_high, 1)}</span></td>
+        <td>${j.wins ?? 0}–${j.draws ?? 0}–${j.losses ?? 0}</td>
+        <td>${prize ? money(prize) : '—'}</td>
+      </tr>`;
     }).join('');
-    root.innerHTML = `
-      <p class="crumbs"><a href="#/bounty/${encodeURIComponent(slug)}">← ${esc(comp.title)}</a></p>
-      <h1 class="bounty-h">Leaderboard</h1>
-      <p class="subline">${entries.length} ranked entries · win rate with its 90% interval · prizes at the live pot.</p>
-      <table class="standings"><thead><tr>
-        <th>Rank</th><th>Entrant</th><th>Win rate</th><th>Prize</th>
-        </tr></thead><tbody>${rows}</tbody></table>
-      <footer class="pager">
-        <button type="button" id="pagePrev"${page === 0 ? ' disabled' : ''}>← Prev</button>
-        <span>Rows ${entries.length ? from + 1 : 0}–${Math.min(entries.length, from + PAGE_SIZE)} of ${entries.length} · Page ${page + 1} of ${pages}</span>
-        <button type="button" id="pageNext"${page >= pages - 1 ? ' disabled' : ''}>Next →</button>
-      </footer>`;
-    root.querySelector('#pagePrev')?.addEventListener('click', () => { page -= 1; paint(); });
-    root.querySelector('#pageNext')?.addEventListener('click', () => { page += 1; paint(); });
+    rowsLine.textContent = entries.length
+      ? `Rows ${from + 1}–${Math.min(from + PAGE, entries.length)} of ${int(entries.length)} · Page ${page} of ${pages}`
+      : 'No ranked entries yet';
+    prev.disabled = page <= 1;
+    next.disabled = page >= pages;
   }
 
+  prev.addEventListener('click', () => { if (page > 1) { page -= 1; paint(); } });
+  next.addEventListener('click', () => { if (page < pages) { page += 1; paint(); } });
   paint();
 }
